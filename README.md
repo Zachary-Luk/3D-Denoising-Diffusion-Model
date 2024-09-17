@@ -43,9 +43,36 @@ The proposed 3D DDPM gradually injects noise into the images during the forward 
 </p>
 The proposed 3D DDPM consistently outperformed 2D DDPM, 3D UNet, and 3D GAN, demonstrating its superior denoising performance across all tested conditions. Additionally, the model’s uncertainty maps exhibited lower variance, reflecting its higher confidence in its outputs. 
 
-## Code
+## Installation
+### Step 1: Clone the Repository
 
-The code for this project will be uploaded soon. Please stay tuned.
+    git clone https://github.com/Miche11eU/PET-Image-Denoising-Using-3D-Diffusion-Model.git
+    cd PET-Image-Denoising-Using-3D-Diffusion-Model
+
+### Step 2: Create and activate the conda environment from the environment.yml file:
+
+    conda env create -f environment.yml
+    conda activate PET-3D-DDPM
+
+### Step 3: Download Pre-trained Models
+Download the pre-trained model files from this [link](https://www.dropbox.com/scl/fo/nj52fz7p23icnkxo3v5y2/AAsggV-0DAuJjd4ILYAE1m4?rlkey=uivlrx0oi68l7n34fkbmamkdj&st=fztnoohh&dl=0) and place them into the `./checkpoint/` folder.
+
+## Testing
+
+### Data Preparation
+
+Before running the denoising script, modify the `load_data_for_worker` function in `./scripts/test.py` to align with your data format and dimensions. This function is responsible for loading your low-dose PET data into the model.
+
+### Running the Denoising Script
+
+We provide a shell script `test_DDPM_3d_mpi.sh` to facilitate the testing process.
+
+#### Usage
+
+- `--base_samples`: Path to the `.npz` files containing your low-dose PET images.
+- `--num_samples`: Total number of samples you wish to process.
+- `-n`: Number of GPUs to utilize for parallel processing.
+- `--save_dir`: Path to the directory where you want to save the denoised images.
 
 ## Contact
 
