@@ -55,7 +55,7 @@ The proposed 3D DDPM consistently outperformed 2D DDPM, 3D UNet, and 3D GAN, dem
     conda activate PET-3D-DDPM
 
 ### Step 3: Download Pre-trained Models
-Download the pre-trained model files from this [link](https://www.dropbox.com/scl/fo/nj52fz7p23icnkxo3v5y2/AAsggV-0DAuJjd4ILYAE1m4?rlkey=uivlrx0oi68l7n34fkbmamkdj&st=fztnoohh&dl=0) and place them into the `./checkpoint/` folder.
+Download the pre-trained model files and place them into the `./checkpoint/` folder.
 
 ## Testing
 
