@@ -55,7 +55,10 @@ The proposed 3D DDPM consistently outperformed 2D DDPM, 3D UNet, and 3D GAN, dem
     conda activate PET-3D-DDPM
 
 ### Step 3: Download Pre-trained Models
-Download the pre-trained model files and place them into the `./checkpoint/` folder.
+Download the pre-trained model files from this [link](https://www.dropbox.com/scl/fo/nj52fz7p23icnkxo3v5y2/AAsggV-0DAuJjd4ILYAE1m4?rlkey=uivlrx0oi68l7n34fkbmamkdj&st=fztnoohh&dl=0) and place them into the `./checkpoint/` folder.
+
+**Note**: This model is licensed under CC BY-NC-SA 4.0. **Commercial use is prohibited.**
+
 
 ## Testing
 
@@ -73,6 +76,17 @@ We provide a shell script `test_DDPM_3d_mpi.sh` to facilitate the testing proces
 - `--num_samples`: Total number of samples you wish to process.
 - `-n`: Number of GPUs to utilize for parallel processing.
 - `--save_dir`: Path to the directory where you want to save the denoised images.
+
+## License
+
+- The **code** in this repository is licensed under the **MIT License**.
+- The **model weights** are licensed under **CC BY-NC-SA 4.0**, meaning:
+  - You **can** share and modify the model weights, but **must** use the same license.
+  - You **cannot** use it for **commercial purposes**.
+
+For details, check:
+- [LICENSE](./LICENSE.txt) (MIT for code)
+- [MODEL_LICENSE](./MODEL_LICENSE.txt) (CC BY-NC-SA 4.0 for model weights)
 
 ## Contact
 
