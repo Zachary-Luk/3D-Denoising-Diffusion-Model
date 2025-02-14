@@ -88,6 +88,18 @@ For details, check:
 - [LICENSE](./LICENSE.txt) (MIT for code)
 - [MODEL_LICENSE](./MODEL_LICENSE.txt) (CC BY-NC-SA 4.0 for model weights)
 
+## BibTeX
+```bibtex
+@article{yu2025robust,
+  title={Robust whole-body PET image denoising using 3D diffusion models: evaluation across various scanners, tracers, and dose levels},
+  author={Yu, Boxiao and Ozdemir, Savas and Dong, Yafei and Shao, Wei and Pan, Tinsu and Shi, Kuangyu and Gong, Kuang},
+  journal={European Journal of Nuclear Medicine and Molecular Imaging},
+  pages={1--14},
+  year={2025},
+  publisher={Springer}
+}
+```
+
 ## Contact
 
 For any questions or inquiries, please contact boxiao.yu@ufl.edu.
