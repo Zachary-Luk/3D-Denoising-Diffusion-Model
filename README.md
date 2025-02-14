@@ -1,4 +1,4 @@
-<h2 align="center">Robust Whole-body PET Image Denoising Using 3D Diffusion Models: Evaluation Across Various Scanners, Tracers, and Dose Levels</h2>
+<h2 align="center"><a href="https://link.springer.com/article/10.1007/s00259-025-07122-4">Robust Whole-body PET Image Denoising Using 3D Diffusion Models: Evaluation Across Various Scanners, Tracers, and Dose Levels</a></h2>
 <div align="center">
   <span class="author-block">
     Boxiao Yu<sup>1</sup>,</span>
@@ -88,7 +88,9 @@ For details, check:
 - [LICENSE](./LICENSE.txt) (MIT for code)
 - [MODEL_LICENSE](./MODEL_LICENSE.txt) (CC BY-NC-SA 4.0 for model weights)
 
-## BibTeX
+## Citation
+If you find our work is useful in your research or applications, please consider giving us a star 🌟 and citing it by the following BibTeX entry.
+
 ```bibtex
 @article{yu2025robust,
   title={Robust whole-body PET image denoising using 3D diffusion models: evaluation across various scanners, tracers, and dose levels},
