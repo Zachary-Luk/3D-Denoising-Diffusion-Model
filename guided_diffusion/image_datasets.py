@@ -1,7 +1,7 @@
 import math
 import random
 import os
-
+import tifffile
 from PIL import Image
 import blobfile as bf
 from mpi4py import MPI
@@ -80,10 +80,8 @@ def _list_image_files_recursively(data_dir):
     for entry in sorted(bf.listdir(data_dir)):
         full_path = bf.join(data_dir, entry)
         ext = entry.split(".")[-1]
-        if "." in entry and ext.lower() in ["npz"]:
+        if "." in entry and ext.lower() in ["jpg", "jpeg", "png", "gif", "tif", "tiff"]:  # 添加 TIFF 支持
             results.append(full_path)
-        elif bf.isdir(full_path):
-            results.extend(_list_image_files_recursively(full_path))
     return results
 
 
@@ -114,44 +112,102 @@ class ImageDataset(Dataset):
     def __getitem__(self, idx):
         path = self.local_images[idx]
 
-        pet_data = np.load(path)['arr_0']
-        # pet_data = pet_data.astype(np.float32) * 2.0 - 1.0
-        pet_data = pet_data.astype(np.float32)
+        # 檢查文件類型並相應處理
+        if path.endswith('.tif') or path.endswith('.tiff'):
+            pet_data = tifffile.imread(path)  # Shape: (depth, height, width) 或其他
+            
+            # 根據你嘅 TIFF 數據結構調整
+            # 假設你嘅 TIFF 係 (depth, height, width) 格式
+            if len(pet_data.shape) == 3:
+                # 如果係單通道 3D 數據，需要創建 low-dose 同 high-dose 對
+                # 你可能需要根據實際情況調整呢個邏輯
+                
+                # 選項 1: 如果你有成對嘅文件（low-dose 同 high-dose）
+                # 你需要修改文件加載邏輯嚟同時加載兩個文件
+                
+                # 選項 2: 如果單一文件包含兩個通道
+                # pet_data 應該係 (2, depth, height, width) 或類似格式
+                
+                # 暫時假設你會提供成對數據，呢度用同一數據作為示例
+                pet_low_data = pet_data.copy()  # 低劑量數據
+                pet_high_data = pet_data.copy()  # 高劑量數據（實際應該係不同文件）
+                
+                # 重新排列維度適應現有邏輯: (height, width, depth)
+                pet_low_data = pet_low_data.transpose(1, 2, 0)  # (D,H,W) -> (H,W,D)
+                pet_high_data = pet_high_data.transpose(1, 2, 0)
+                
+            elif len(pet_data.shape) == 4:
+                # 如果已經係 (channels, depth, height, width) 或類似
+                pet_low_data = pet_data[0].transpose(1, 2, 0)  # 第一個通道
+                pet_high_data = pet_data[1].transpose(1, 2, 0)  # 第二個通道
+            else:
+                raise ValueError(f"Unsupported TIFF shape: {pet_data.shape}")
+                
+            # 數據正規化
+            pet_low_data = pet_low_data.astype(np.float32) / 4
+            pet_high_data = pet_high_data.astype(np.float32) / 4
+            
+            # 獲取實際尺寸
+            H, W, D = pet_low_data.shape  # 例如 (200, 200, 105)
+            
+            # 調整隨機裁剪邏輯適應你嘅數據尺寸
+            size_xy = min(96, min(H, W))  # 確保唔會超出邊界
+            size_z = min(96, D)
+            
+            # 隨機裁剪
+            if H > size_xy:
+                rand_x = np.random.randint(0, H - size_xy + 1)
+            else:
+                rand_x = 0
+                
+            if W > size_xy:
+                rand_y = np.random.randint(0, W - size_xy + 1)
+            else:
+                rand_y = 0
+                
+            if D > size_z:
+                rand_z = np.random.randint(0, D - size_z + 1)
+            else:
+                rand_z = 0
+            
+            # 提取 patch
+            pet_low = pet_low_data[rand_x:rand_x+size_xy, rand_y:rand_y+size_xy, rand_z:rand_z+size_z].copy()
+            label = pet_high_data[rand_x:rand_x+size_xy, rand_y:rand_y+size_xy, rand_z:rand_z+size_z].copy()
+            
+            # 如果裁剪後尺寸唔夠，進行 padding
+            if pet_low.shape[0] < size_xy or pet_low.shape[1] < size_xy or pet_low.shape[2] < size_z:
+                padded_low = np.zeros((size_xy, size_xy, size_z), dtype=np.float32)
+                padded_label = np.zeros((size_xy, size_xy, size_z), dtype=np.float32)
+                
+                actual_h, actual_w, actual_d = pet_low.shape
+                padded_low[:actual_h, :actual_w, :actual_d] = pet_low
+                padded_label[:actual_h, :actual_w, :actual_d] = label
+                
+                pet_low = padded_low
+                label = padded_label
+            
+        else:
+            # 原來 NPZ 處理邏輯
+            pet_data = np.load(path)['arr_0']
+            pet_data = pet_data.astype(np.float32)
+            pet_data = pet_data/4
 
-        pet_data = pet_data/4 # add nmlz
-        # pet_data = pet_data * 2.0 - 1.0
+            # 原來嘅隨機裁剪邏輯
+            size_xy = 96
+            size_z = 96
+            rand_x = np.random.randint(0, 180-size_xy+1)
+            rand_y = np.random.randint(0, 280-size_xy+1) 
+            rand_z = np.random.randint(0, 520-size_z+1) 
+            pet_low = pet_data[0, rand_x:rand_x+size_xy, rand_y:rand_y+size_xy, rand_z:rand_z+size_z].copy()
+            label = pet_data[1, rand_x:rand_x+size_xy, rand_y:rand_y+size_xy, rand_z:rand_z+size_z].copy()
 
-        # input 96*96*96
-        # size = 96  # patch size
-        # rand_xyz = np.random.randint(0, 144-size+1, 3)
-        # pet_low = pet_data[0:2,rand_xyz[0]:rand_xyz[0]+size,rand_xyz[1]:rand_xyz[1]+size,rand_xyz[2]:rand_xyz[2]+size].copy()
-        # label = pet_data[2,rand_xyz[0]:rand_xyz[0]+size,rand_xyz[1]:rand_xyz[1]+size,rand_xyz[2]:rand_xyz[2]+size].copy()
-        # while label.max() == 0:
-        #     rand_xyz = np.random.randint(0, 144-size+1, 3)
-        #     pet_low = pet_data[0:2,rand_xyz[0]:rand_xyz[0]+size,rand_xyz[1]:rand_xyz[1]+size,rand_xyz[2]:rand_xyz[2]+size].copy()
-        #     label = pet_data[2,rand_xyz[0]:rand_xyz[0]+size,rand_xyz[1]:rand_xyz[1]+size,rand_xyz[2]:rand_xyz[2]+size].copy()
-        # C, H, W, T = pet_low.shape
-
-        # input 96*96*32
-        size_xy = 96  # patch size
-        size_z = 96 #32
-        rand_x = np.random.randint(0, 180-size_xy+1)
-        rand_y = np.random.randint(0, 280-size_xy+1) 
-        rand_z = np.random.randint(0, 520-size_z+1) 
-        pet_low = pet_data[0, rand_x:rand_x+size_xy, rand_y:rand_y+size_xy, rand_z:rand_z+size_z].copy()
-        label = pet_data[1, rand_x:rand_x+size_xy, rand_y:rand_y+size_xy, rand_z:rand_z+size_z].copy()
-        # while label.max() == label.min():
-        #     rand_xy = np.random.randint(0, 144-size_xy+1, 2)
-        #     rand_z = np.random.randint(0, 144-size_z+1)
-        #     pet_low = pet_data[0:2, rand_xy[0]:rand_xy[0]+size_xy, rand_xy[1]:rand_xy[1]+size_xy, rand_z:rand_z+size_z].copy()
-        #     label = pet_data[2, rand_xy[0]:rand_xy[0]+size_xy, rand_xy[1]:rand_xy[1]+size_xy, rand_z:rand_z+size_z].copy()
         H, W, T = pet_low.shape
 
         out_dict = {}
         if self.local_classes is not None:
             out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
+        
         return np.transpose(pet_low.reshape((1, H, W, T)), [0, 3, 1, 2]), np.transpose(label.reshape((1, H, W, T)), [0, 3, 1, 2]), out_dict
-
 
 
 def center_crop_arr(pil_image, image_size):

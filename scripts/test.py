@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
+import tifffile  
 import blobfile as bf
 import numpy as np
 import torch as th
@@ -102,15 +102,63 @@ def main():
 
 
 def load_data_for_worker(base_samples, batch_size, class_cond):
-    with bf.BlobFile(base_samples, "rb") as f:
-        obj = np.load(f)
-        low_pet = obj["arr_0"][0] 
-        image_arr = np.zeros((6,192,288,96))
-        index = 0
-        for i in (0, 86, 172, 258, 344, 424):
-            image_arr[index,:,:,:] = low_pet[:, :, i:i+96]
-            index += 1
+    if base_samples.endswith('.tif') or base_samples.endswith('.tiff'):
+        # 讀取 TIFF 文件
+
+        # 讀取 3D TIFF
+        low_pet = tifffile.imread(base_samples)  # Shape: (depth, height, width)
+        
+        # 或者用 PIL 方法（如果 tifffile 有問題）
+        # from PIL import Image
+        # img = Image.open(base_samples)
+        # frames = []
+        # try:
+        #     while True:
+        #         frames.append(np.array(img))
+        #         img.seek(img.tell() + 1)
+        # except EOFError:
+        #     pass
+        # low_pet = np.stack(frames, axis=0)
+        
+        # 獲取實際尺寸
+        depth, height, width = low_pet.shape  # 例如 (105, 200, 200)
+        
+        # 根據你嘅數據尺寸調整 patch 策略
+        if depth <= 96:
+            # 如果深度小於等於 96，用一個 patch，需要 padding
+            image_arr = np.zeros((1, height, width, 96))
+            pad_before = (96 - depth) // 2
+            pad_after = 96 - depth - pad_before
+            padded_volume = np.pad(low_pet, ((pad_before, pad_after), (0, 0), (0, 0)), 
+                                  mode='constant', constant_values=0)
+            image_arr[0, :, :, :] = padded_volume.transpose(1, 2, 0)  # (D,H,W) -> (H,W,D)
+        else:
+            # 如果深度大於 96，分成多個 patches（類似原來邏輯）
+            # 你可以根據實際情況調整
+            num_patches = 2  # 或者動態計算
+            patch_size = 64  # 調整 patch 大小
+            image_arr = np.zeros((num_patches, height, width, patch_size))
             
+            # 簡單分割（你可以根據需要調整重疊策略）
+            if depth == 105:
+                # 分成 2 個重疊 patches
+                image_arr[0, :, :, :] = low_pet[0:64, :, :].transpose(1, 2, 0)
+                image_arr[1, :, :, :] = low_pet[41:105, :, :].transpose(1, 2, 0)
+            elif depth == 102:
+                image_arr[0, :, :, :] = low_pet[0:64, :, :].transpose(1, 2, 0)
+                image_arr[1, :, :, :] = low_pet[38:102, :, :].transpose(1, 2, 0)
+    else:
+        # 原來 NPZ 處理邏輯
+        with bf.BlobFile(base_samples, "rb") as f:
+            obj = np.load(f)
+            low_pet = obj["arr_0"][0] 
+            image_arr = np.zeros((6,192,288,96))
+            index = 0
+            for i in (0, 86, 172, 258, 344, 424):
+                image_arr[index,:,:,:] = low_pet[:, :, i:i+96]
+                index += 1
+    
+    # 數據正規化（對所有情況都適用）
     image_arr[image_arr>4] = 4
     image_arr = image_arr/4
 
