@@ -13,7 +13,7 @@ import torch.distributed as dist
 
 # Change this to reflect your cluster layout.
 # The GPU for a given rank is (rank % GPUS_PER_NODE).
-GPUS_PER_NODE = 8
+GPUS_PER_NODE = 1
 
 SETUP_RETRY_COUNT = 3
 
@@ -24,6 +24,14 @@ def setup_dist():
     """
     if dist.is_initialized():
         return
+    
+    # Check if we're running in single GPU mode
+    if MPI.COMM_WORLD.Get_size() == 1:
+        # Single GPU mode - no distributed setup needed
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        return
+    
+    # Original distributed setup for multi-GPU
     os.environ["CUDA_VISIBLE_DEVICES"] = f"{MPI.COMM_WORLD.Get_rank() % GPUS_PER_NODE}"
     # os.environ['CUDA_VISIBLE_DEVICES'] = "3"
 
@@ -41,7 +49,6 @@ def setup_dist():
     port = comm.bcast(_find_free_port(), root=0)
     os.environ["MASTER_PORT"] = str(port)
     dist.init_process_group(backend=backend, init_method="env://")
-
 
 def dev():
     """

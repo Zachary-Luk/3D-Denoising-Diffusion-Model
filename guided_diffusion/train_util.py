@@ -112,7 +112,6 @@ class TrainLoop:
 
         if resume_checkpoint:
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
-            #if dist.get_rank() == 0:
             logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
             self.model.load_state_dict(
                 dist_util.load_state_dict(
@@ -120,7 +119,9 @@ class TrainLoop:
                 )
             )
 
-        dist_util.sync_params(self.model.parameters())
+        # Only sync if distributed is initialized
+        if dist.is_initialized():
+            dist_util.sync_params(self.model.parameters())
 
     def _load_ema_parameters(self, rate):
         ema_params = copy.deepcopy(self.mp_trainer.master_params)
@@ -128,15 +129,16 @@ class TrainLoop:
         main_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
         ema_checkpoint = find_ema_checkpoint(main_checkpoint, self.resume_step, rate)
         if ema_checkpoint:
-            #if dist.get_rank() == 0:
             logger.log(f"loading EMA from checkpoint: {ema_checkpoint}...")
             state_dict = dist_util.load_state_dict(
                 ema_checkpoint, map_location=dist_util.dev()
             )
             ema_params = self.mp_trainer.state_dict_to_master_params(state_dict)
 
-        dist_util.sync_params(ema_params)
-        return ema_params
+        # Only sync if distributed is initialized
+        if dist.is_initialized():
+            dist_util.sync_params(ema_params)
+            return ema_params
 
     def _load_optimizer_state(self):
         main_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
@@ -231,10 +233,11 @@ class TrainLoop:
         logger.logkv("step", self.step + self.resume_step)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
 
+
     def save(self):
         def save_checkpoint(rate, params):
             state_dict = self.mp_trainer.master_params_to_state_dict(params)
-            if dist.get_rank() == 0:
+            if not dist.is_initialized() or dist.get_rank() == 0:
                 logger.log(f"saving model {rate}...")
                 if not rate:
                     filename = f"model{(self.step+self.resume_step):06d}.pt"
@@ -247,15 +250,16 @@ class TrainLoop:
         for rate, params in zip(self.ema_rate, self.ema_params):
             save_checkpoint(rate, params)
 
-        if dist.get_rank() == 0:
+        if not dist.is_initialized() or dist.get_rank() == 0:
             with bf.BlobFile(
                 bf.join(get_blob_logdir(), f"opt{(self.step+self.resume_step):06d}.pt"),
                 "wb",
             ) as f:
                 th.save(self.opt.state_dict(), f)
 
-        dist.barrier()
-
+        # Only barrier if distributed is initialized
+        if dist.is_initialized():
+            dist.barrier()
 
 def parse_resume_step_from_filename(filename):
     """

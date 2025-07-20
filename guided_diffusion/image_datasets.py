@@ -41,17 +41,25 @@ def load_data(
     all_files = _list_image_files_recursively(data_dir)
     classes = None
     if class_cond:
-        # Assume classes are the first part of the filename,
-        # before an underscore.
         class_names = [bf.basename(path).split("_")[0] for path in all_files]
         sorted_classes = {x: i for i, x in enumerate(sorted(set(class_names)))}
         classes = [sorted_classes[x] for x in class_names]
+    
+    # Handle single GPU vs multi-GPU
+    try:
+        from mpi4py import MPI
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+    except:
+        rank = 0
+        size = 1
+    
     dataset = ImageDataset(
         image_size,
         all_files,
         classes=classes,
-        shard=MPI.COMM_WORLD.Get_rank(),
-        num_shards=MPI.COMM_WORLD.Get_size(),
+        shard=rank,
+        num_shards=size,
         random_crop=random_crop,
         random_flip=random_flip,
     )

@@ -43,7 +43,6 @@ def main():
 
     device = th.device("cuda" if th.cuda.is_available() else "cpu")
 
-
     while len(all_images) * args.batch_size < args.num_samples:
         model_kwargs = next(data)
         model_kwargs = {k: v.to(dist_util.dev()) for k, v in model_kwargs.items()} 
@@ -67,10 +66,16 @@ def main():
         sample = sample.permute(0, 1, 3, 4, 2)
         sample = sample.contiguous() 
 
-        all_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
-        dist.all_gather(all_samples, sample) 
-        for sample in all_samples:
+        # Handle single GPU vs multi-GPU
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            all_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
+            dist.all_gather(all_samples, sample) 
+            for sample in all_samples:
+                all_images.append(sample.cpu().numpy())
+        else:
+            # Single GPU mode
             all_images.append(sample.cpu().numpy())
+            
         logger.log(f"created {len(all_images) * args.batch_size} samples\n")
 
     arr = np.concatenate(all_images, axis=0)
@@ -83,13 +88,16 @@ def main():
         arr_result[:, :, i*96:(i+1)*96] = arr[index,:,:,:]
         index += 1
 
-    if dist.get_rank() == 0:
+    # Handle single GPU vs multi-GPU for saving
+    if not dist.is_initialized() or dist.get_rank() == 0:
         shape_str = "x".join([str(x) for x in arr_result.shape])
         out_path = os.path.join(logger.get_dir(), f"samples_{shape_str}_{datetime.datetime.now().strftime('%H%M%S%f')}.npz")
         logger.log(f"saving to {out_path}")
         np.savez(out_path, arr_result)
 
-    dist.barrier()
+    # Only barrier if distributed is initialized
+    if dist.is_initialized():
+        dist.barrier()
     logger.log("sampling complete")
 
 
@@ -106,10 +114,15 @@ def load_data_for_worker(base_samples, batch_size, class_cond):
     image_arr[image_arr>4] = 4
     image_arr = image_arr/4
 
-    rank = dist.get_rank()
+    # Handle single GPU vs multi-GPU
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        num_ranks = dist.get_world_size()
+    else:
+        rank = 0
+        num_ranks = 1
+        
     logger.log('rank:{%d}' % (rank))
-    
-    num_ranks = dist.get_world_size()
     logger.log('num_ranks:{%d}' % (num_ranks))
 
     buffer = []
