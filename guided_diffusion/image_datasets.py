@@ -5,8 +5,10 @@ import tifffile
 from PIL import Image
 import blobfile as bf
 from mpi4py import MPI
-import numpy as np
 from torch.utils.data import DataLoader, Dataset
+import SimpleITK as sitk
+import numpy as np
+import torch
 
 def load_data(
     *,
@@ -47,14 +49,13 @@ def load_data(
     
     # Handle single GPU vs multi-GPU
     try:
-        from mpi4py import MPI
         rank = MPI.COMM_WORLD.Get_rank()
         size = MPI.COMM_WORLD.Get_size()
     except:
         rank = 0
         size = 1
     
-    dataset = ImageDataset(
+    dataset = CustomImageDataset(
         image_size,
         all_files,
         classes=classes,
@@ -74,14 +75,72 @@ def load_data(
     while True:
         yield from loader
 
+def load_tif(path):
+    try:
+        img = sitk.ReadImage(path)
+        array = sitk.GetArrayFromImage(img)  # SimpleITK: [D, H, W]
+        
+        # 轉為 PyTorch 約定 [C, D, H, W]
+        if len(array.shape) == 3:  # 3D
+            array = np.expand_dims(array, axis=0)  # [C=1, D, H, W]
+        elif len(array.shape) == 2:  # 2D
+            array = np.expand_dims(np.expand_dims(array, axis=0), axis=0)  # [C=1, D=1, H, W]
+        
+        tensor = torch.from_numpy(array.astype(np.float32))
+        return tensor
+    except Exception as e:
+        raise ValueError(f"Error reading TIFF {path}: {e}")
+
+
+class CustomImageDataset(Dataset):
+    def __init__(
+        self,
+        resolution,  # image_size
+        image_paths,  # all_files
+        classes=None,
+        shard=0,
+        num_shards=1,
+        # 移除 random_crop=False, random_flip=False 參數
+    ):
+        super().__init__()
+        self.resolution = resolution
+        self.local_images = image_paths[shard::num_shards]  # 分片邏輯
+        self.classes = None if classes is None else classes[shard::num_shards]
+        # 移除 self.random_crop 同 self.random_flip
+
+    def __len__(self):
+        return len(self.local_images)
+
+    def __getitem__(self, idx):
+        path = self.local_images[idx]
+        if path.lower().endswith('.tif') or path.lower().endswith('.tiff'):
+            arr = load_tif(path)  # 使用修改後嘅 TIFF loader
+        else:
+            # PIL 讀取邏輯（移除正規化）
+            with bf.BlobFile(path, "rb") as f:
+                pil_image = Image.open(f)
+                pil_image.load()
+            pil_image = pil_image.convert("RGB")
+            arr = np.array(pil_image).astype(np.float32)  # 移除 / 127.5 - 1.0
+            arr = arr.transpose(2, 0, 1)  # [C, H, W]
+            arr = torch.from_numpy(arr)
+
+        out = {}
+        out["image"] = arr  # 直接返回，無 augmentation
+        if self.classes is not None:
+            out["class"] = torch.tensor(self.classes[idx])
+        return out
+
 
 def _list_image_files_recursively(data_dir):
     results = []
-    for entry in sorted(bf.listdir(data_dir)):
-        full_path = bf.join(data_dir, entry)
+    for entry in sorted(os.listdir(data_dir)):
+        full_path = os.path.join(data_dir, entry)
         ext = entry.split(".")[-1]
-        if "." in entry and ext.lower() in ["jpg", "jpeg", "png", "gif", "tif", "tiff"]:  # 添加 TIFF 支持
+        if "." in entry and ext.lower() in ["jpg", "jpeg", "png", "gif", "tif", "tiff"]:  # 添加 tif 支持
             results.append(full_path)
+        elif os.path.isdir(full_path):
+            results.extend(_list_image_files_recursively(full_path))
     return results
 
 
