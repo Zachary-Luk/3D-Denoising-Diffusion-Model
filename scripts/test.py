@@ -115,8 +115,8 @@ def main():
                 arr_result = np.zeros((original_height, original_width, original_depth))
                 
                 # 根據 patch 策略重組（基於 load_data_for_worker 入面嘅邏輯）
-                patch_depth = 96
-                overlap = 20
+                patch_depth = 2
+                overlap = 1
                 stride = patch_depth - overlap
                 
                 for i, patch in enumerate(arr):
@@ -215,7 +215,7 @@ def load_data_for_worker(base_samples, batch_size, class_cond):
         logger.log(f'TIFF shape: {depth}x{height}x{width}')
         
         # 動態決定 patch 策略
-        patch_depth = 96  # 可以調整呢個值
+        patch_depth = 2  # 可以調整呢個值
         
         if depth <= patch_depth:
             # 如果深度小於等於 patch_depth，用一個 patch，需要 padding
@@ -228,7 +228,7 @@ def load_data_for_worker(base_samples, batch_size, class_cond):
             logger.log(f'Using 1 patch with padding: {patch_depth} slices')
         else:
             # 動態計算需要幾多個 patches
-            overlap = 20  # 重疊大小，可以調整
+            overlap = 1 # 重疊大小，可以調整
             stride = patch_depth - overlap
             num_patches = (depth - overlap + stride - 1) // stride  # 向上取整
             
