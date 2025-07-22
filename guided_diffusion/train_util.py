@@ -33,7 +33,7 @@ class TrainLoop:
         log_interval,
         save_interval,
         resume_checkpoint,
-        use_fp16=False,
+        use_fp16=True,
         fp16_scale_growth=1e-3,
         schedule_sampler=None,
         weight_decay=0.0,
@@ -61,7 +61,16 @@ class TrainLoop:
 
         self.step = 0
         self.resume_step = 0
-        self.global_batch = self.batch_size * dist.get_world_size()
+
+
+
+        #檢查 dist 是否初始化
+        if dist.is_initialized():
+            self.global_batch = self.batch_size * dist.get_world_size()
+        else:
+            # 單 GPU 模式：global_batch 等於 batch_size
+            self.global_batch = self.batch_size
+            print("Single GPU mode detected: global_batch set to batch_size")
 
         self.sync_cuda = th.cuda.is_available()
 
@@ -89,17 +98,22 @@ class TrainLoop:
             ]
 
         if th.cuda.is_available():
-            self.use_ddp = True
-            self.ddp_model = DDP(
-                self.model,
-                device_ids=[dist_util.dev()],
-                output_device=dist_util.dev(),
-                broadcast_buffers=False,
-                bucket_cap_mb=128,
-                find_unused_parameters=False,
-            )
+            if dist.is_initialized():
+                self.use_ddp = True
+                self.ddp_model = DDP(
+                    self.model,
+                    device_ids=[dist_util.dev()],
+                    output_device=dist_util.dev(),
+                    broadcast_buffers=False,
+                    bucket_cap_mb=128,
+                    find_unused_parameters=False,
+                )
+            else:
+                self.use_ddp = False
+                self.ddp_model = self.model
+                print("Single GPU mode: DDP disabled")
         else:
-            if dist.get_world_size() > 1:
+            if dist.is_initialized() and dist.get_world_size() > 1:
                 logger.warn(
                     "Distributed training requires CUDA. "
                     "Gradients will not be synchronized properly!"
@@ -233,11 +247,11 @@ class TrainLoop:
         logger.logkv("step", self.step + self.resume_step)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
 
-
     def save(self):
         def save_checkpoint(rate, params):
             state_dict = self.mp_trainer.master_params_to_state_dict(params)
-            if not dist.is_initialized() or dist.get_rank() == 0:
+            # 改進：檢查 dist 初始化來避免 dist.get_rank() 錯誤
+            if not dist.is_initialized() or (dist.is_initialized() and dist.get_rank() == 0):
                 logger.log(f"saving model {rate}...")
                 if not rate:
                     filename = f"model{(self.step+self.resume_step):06d}.pt"
@@ -250,7 +264,7 @@ class TrainLoop:
         for rate, params in zip(self.ema_rate, self.ema_params):
             save_checkpoint(rate, params)
 
-        if not dist.is_initialized() or dist.get_rank() == 0:
+        if not dist.is_initialized() or (dist.is_initialized() and dist.get_rank() == 0):
             with bf.BlobFile(
                 bf.join(get_blob_logdir(), f"opt{(self.step+self.resume_step):06d}.pt"),
                 "wb",
