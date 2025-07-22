@@ -60,9 +60,8 @@ def load_data(
         all_files,
         classes=classes,
         shard=rank,
-        num_shards=size,
-        random_crop=random_crop,
-        random_flip=random_flip,
+        num_shards=size
+
     )
     if deterministic:
         loader = DataLoader(
@@ -76,14 +75,14 @@ def load_data(
         yield from loader
 
 def load_tif(path):
+    """讀取 TIFF 並返回 [C, D, H, W] 格式"""
     try:
         img = sitk.ReadImage(path)
-        array = sitk.GetArrayFromImage(img)  # SimpleITK: [D, H, W]
+        array = sitk.GetArrayFromImage(img)  # [D, H, W] 或 [H, W]
         
-        # 轉為 PyTorch 約定 [C, D, H, W]
         if len(array.shape) == 3:  # 3D
             array = np.expand_dims(array, axis=0)  # [C=1, D, H, W]
-        elif len(array.shape) == 2:  # 2D
+        elif len(array.shape) == 2:  # 2D  
             array = np.expand_dims(np.expand_dims(array, axis=0), axis=0)  # [C=1, D=1, H, W]
         
         tensor = torch.from_numpy(array.astype(np.float32))
@@ -106,7 +105,7 @@ class CustomImageDataset(Dataset):
         self.resolution = resolution
         self.local_images = image_paths[shard::num_shards]  # 分片邏輯
         self.classes = None if classes is None else classes[shard::num_shards]
-        # 移除 self.random_crop 同 self.random_flip
+        
 
     def __len__(self):
         return len(self.local_images)
@@ -114,9 +113,8 @@ class CustomImageDataset(Dataset):
     def __getitem__(self, idx):
         path = self.local_images[idx]
         if path.lower().endswith('.tif') or path.lower().endswith('.tiff'):
-            arr = load_tif(path)  # 使用修改後嘅 TIFF loader
+            arr = load_tif(path)  # [C, D, H, W]
         else:
-            # PIL 讀取邏輯（移除正規化）
             with bf.BlobFile(path, "rb") as f:
                 pil_image = Image.open(f)
                 pil_image.load()
@@ -126,10 +124,11 @@ class CustomImageDataset(Dataset):
             arr = torch.from_numpy(arr)
 
         out = {}
-        out["image"] = arr  # 直接返回，無 augmentation
+        out["image"] = arr
+        out["low_res"] = arr.clone()  # SuperRes 模型需要
         if self.classes is not None:
             out["class"] = torch.tensor(self.classes[idx])
-        return out
+        return out, out  # 返回 (target, conditioning)
 
 
 def _list_image_files_recursively(data_dir):
