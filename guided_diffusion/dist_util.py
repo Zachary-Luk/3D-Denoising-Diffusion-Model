@@ -18,6 +18,7 @@ GPUS_PER_NODE = 1
 SETUP_RETRY_COUNT = 3
 
 
+
 def setup_dist():
     """
     Setup a distributed process group.
@@ -25,30 +26,34 @@ def setup_dist():
     if dist.is_initialized():
         return
     
-    # Check if we're running in single GPU mode
-    if MPI.COMM_WORLD.Get_size() == 1:
-        # Single GPU mode - no distributed setup needed
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-        return
+    # 改進：檢查環境變量來決定是否強制單 GPU 模式（預設啟用）
+    if os.getenv('FORCE_SINGLE_GPU', '1') == '1':
+        # 允許用戶指定 GPU ID（預設 0）
+        gpu_id = os.getenv('SINGLE_GPU_ID', '0')
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+        print(f"Force single GPU mode on GPU {gpu_id}")
+        return  # 直接返回，不進行分散式初始化
     
-    # Original distributed setup for multi-GPU
-    os.environ["CUDA_VISIBLE_DEVICES"] = f"{MPI.COMM_WORLD.Get_rank() % GPUS_PER_NODE}"
-    # os.environ['CUDA_VISIBLE_DEVICES'] = "3"
-
-    comm = MPI.COMM_WORLD
-    backend = "gloo" if not th.cuda.is_available() else "nccl"
-
-    if backend == "gloo":
-        hostname = "localhost"
-    else:
-        hostname = socket.gethostbyname(socket.getfqdn())
-    os.environ["MASTER_ADDR"] = comm.bcast(hostname, root=0)
-    os.environ["RANK"] = str(comm.rank)
-    os.environ["WORLD_SIZE"] = str(comm.size)
-
-    port = comm.bcast(_find_free_port(), root=0)
-    os.environ["MASTER_PORT"] = str(port)
-    dist.init_process_group(backend=backend, init_method="env://")
+    # 原代碼（註釋掉以保留兼容性）
+    # if MPI.COMM_WORLD.Get_size() == 1:
+    #     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    #     return
+    # 
+    # os.environ["CUDA_VISIBLE_DEVICES"] = f"{MPI.COMM_WORLD.Get_rank() % GPUS_PER_NODE}"
+    # comm = MPI.COMM_WORLD
+    # backend = "gloo" if not th.cuda.is_available() else "nccl"
+    # 
+    # if backend == "gloo":
+    #     hostname = "localhost"
+    # else:
+    #     hostname = socket.gethostbyname(socket.getfqdn())
+    # os.environ["MASTER_ADDR"] = comm.bcast(hostname, root=0)
+    # os.environ["RANK"] = str(comm.rank)
+    # os.environ["WORLD_SIZE"] = str(comm.size)
+    # 
+    # port = comm.bcast(_find_free_port(), root=0)
+    # os.environ["MASTER_PORT"] = str(port)
+    # dist.init_process_group(backend=backend, init_method="env://")
 
 def dev():
     """
