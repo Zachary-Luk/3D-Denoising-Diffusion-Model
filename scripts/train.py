@@ -75,9 +75,9 @@ def load_superres_data(data_dir, batch_size, large_size, small_size, class_cond=
         image_size=large_size,
         class_cond=class_cond,
     )
-    for pet_batch, label_batch, model_kwargs in data:
-        model_kwargs["low_res"] = pet_batch.clone()
-        yield label_batch, model_kwargs
+    for image_batch, model_kwargs in data:  # ✅ 修正為 2 個值
+        # model_kwargs 已經包含 "low_res"，不需要再次設置
+        yield image_batch, model_kwargs
 
 '''
 def load_superres_data(data_dir, batch_size, large_size, small_size, class_cond=False):

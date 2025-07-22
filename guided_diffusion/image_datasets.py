@@ -90,7 +90,6 @@ def load_tif(path):
     except Exception as e:
         raise ValueError(f"Error reading TIFF {path}: {e}")
 
-
 class CustomImageDataset(Dataset):
     def __init__(
         self,
@@ -99,13 +98,11 @@ class CustomImageDataset(Dataset):
         classes=None,
         shard=0,
         num_shards=1,
-        # 移除 random_crop=False, random_flip=False 參數
     ):
         super().__init__()
         self.resolution = resolution
         self.local_images = image_paths[shard::num_shards]  # 分片邏輯
         self.classes = None if classes is None else classes[shard::num_shards]
-        
 
     def __len__(self):
         return len(self.local_images)
@@ -119,16 +116,18 @@ class CustomImageDataset(Dataset):
                 pil_image = Image.open(f)
                 pil_image.load()
             pil_image = pil_image.convert("RGB")
-            arr = np.array(pil_image).astype(np.float32)  # 移除 / 127.5 - 1.0
+            arr = np.array(pil_image).astype(np.float32)
             arr = arr.transpose(2, 0, 1)  # [C, H, W]
             arr = torch.from_numpy(arr)
 
-        out = {}
-        out["image"] = arr
-        out["low_res"] = arr.clone()  # SuperRes 模型需要
+        # 構建 model_kwargs
+        model_kwargs = {}
+        model_kwargs["low_res"] = arr.clone()  # SuperRes 需要的條件
         if self.classes is not None:
-            out["class"] = torch.tensor(self.classes[idx])
-        return out, out  # 返回 (target, conditioning)
+            model_kwargs["y"] = torch.tensor(self.classes[idx])
+        
+        # 返回正確格式：(image_tensor, model_kwargs_dict)
+        return arr, model_kwargs
 
 
 def _list_image_files_recursively(data_dir):
