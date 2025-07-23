@@ -225,11 +225,11 @@ class ImageDataset(Dataset):
         low_np  = np.transpose(low_patch .reshape((C, H, W, T)), (0, 3, 1, 2))
         high_np = np.transpose(high_patch.reshape((C, H, W, T)), (0, 3, 1, 2))
 
-        out_dict = {}
+        model_kwargs = {"low_res": low_np}
         if self.local_classes is not None:
-            out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
+            model_kwargs["y"] = np.array(self.local_classes[idx], dtype=np.int64)
 
-        return low_np, high_np, out_dict
+        return high_np, model_kwargs      # 只回傳 2-tuple
 
 def center_crop_arr(pil_image, image_size):
     # We are not on a new enough PIL to support the `reducing_gap`
