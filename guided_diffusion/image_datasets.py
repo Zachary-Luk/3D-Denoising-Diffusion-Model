@@ -143,65 +143,43 @@ def _list_image_files_recursively(data_dir):
 
 
 class ImageDataset(Dataset):
-    """
-    讀取 3D 醫學影像 (TIFF 或 NPZ) ，隨機裁剪
-    (self.resolution × self.resolution × self.resolution) patch。
-    傳回：
-        low_patch  -> 形狀 (1,  D, H, W)
-        high_patch -> 形狀 (1,  D, H, W)
-    """
-    def __init__(
-        self,
-        resolution,
-        image_paths,
-        classes=None,
-        shard=0,
-        num_shards=1,
-        random_crop=False,
-        random_flip=False,
-    ):
+    def __init__(self, resolution, image_paths, classes=None,
+                 shard=0, num_shards=1, **kwargs):
         super().__init__()
         self.resolution = resolution
         self.local_images  = image_paths[shard:][::num_shards]
         self.local_classes = None if classes is None else classes[shard:][::num_shards]
 
-    # ------------------- 基本 API -------------------
     def __len__(self):
         return len(self.local_images)
 
     def __getitem__(self, idx):
         path = self.local_images[idx]
+        ext  = os.path.splitext(path)[1].lower()
 
-        # -------- 1. 讀檔並得到 low_vol, high_vol (H,W,D) --------
-        if path.endswith((".tif", ".tiff")):
-            vol = tifffile.imread(path)                     # (D,H,W) or (C,D,H,W)
-            if vol.ndim == 3:                               # (D,H,W) 單通道
+        # -------- 1. 只處理 tiff --------
+        if ext in (".tif", ".tiff"):
+            vol = tifffile.imread(path)
+            if vol.ndim == 3:                       # (D,H,W)
                 low_vol  = vol
                 high_vol = vol
-            elif vol.ndim == 4 and vol.shape[0] >= 2:       # (C,D,H,W)
-                low_vol  = vol[0]
-                high_vol = vol[1]
+            elif vol.ndim == 4 and vol.shape[0] >= 2:  # (C,D,H,W)
+                low_vol, high_vol = vol[0], vol[1]
             else:
                 raise ValueError(f"Unsupported TIFF shape {vol.shape}")
-            low_vol  = low_vol .transpose(1, 2, 0) / 4.0    # -> (H,W,D)
-            high_vol = high_vol.transpose(1, 2, 0) / 4.0
-        # else:                                               # NPZ 分支
-        #     vol = np.load(path)["arr_0"].astype(np.float32) / 4.0  # (2,H,W,D)
-        #     low_vol  = vol[0]
-        #     high_vol = vol[1]
+            low_vol  = low_vol .transpose(1, 2, 0) / 4
+            high_vol = high_vol.transpose(1, 2, 0) / 4
+        else:
+            raise ValueError(f"Unsupported file type: {ext}")
 
-        # -------- 2. 隨機裁剪 patch --------
+        # -------- 2. 隨機裁剪 --------
         H, W, D   = low_vol.shape
         size_xy   = min(self.resolution, H, W)
         size_z    = min(self.resolution, D)
 
-        max_x = max(H - size_xy, 0)
-        max_y = max(W - size_xy, 0)
-        max_z = max(D - size_z , 0)
-
-        rand_x = np.random.randint(0, max_x + 1)
-        rand_y = np.random.randint(0, max_y + 1)
-        rand_z = np.random.randint(0, max_z + 1)
+        rand_x = np.random.randint(0, max(H-size_xy,0)+1)
+        rand_y = np.random.randint(0, max(W-size_xy,0)+1)
+        rand_z = np.random.randint(0, max(D-size_z ,0)+1)
 
         low_patch  = low_vol [rand_x:rand_x+size_xy,
                               rand_y:rand_y+size_xy,
@@ -210,26 +188,23 @@ class ImageDataset(Dataset):
                               rand_y:rand_y+size_xy,
                               rand_z:rand_z+size_z]
 
-        # -------- 3. Pad 不足尺寸 --------
         if low_patch.shape != (size_xy, size_xy, size_z):
-            pad_shape = (size_xy, size_xy, size_z)
-            pad_low  = np.zeros(pad_shape, dtype=np.float32)
-            pad_high = np.zeros(pad_shape, dtype=np.float32)
-            h, w, d  = low_patch.shape
-            pad_low [:h, :w, :d] = low_patch
-            pad_high[:h, :w, :d] = high_patch
-            low_patch , high_patch = pad_low, pad_high
+            pad_low  = np.zeros((size_xy, size_xy, size_z), np.float32)
+            pad_high = np.zeros_like(pad_low)
+            h,w,d = low_patch.shape
+            pad_low [:h,:w,:d] = low_patch
+            pad_high[:h,:w,:d] = high_patch
+            low_patch, high_patch = pad_low, pad_high
 
-        # -------- 4. 轉成 (C=1, D, H, W) --------
-        C, H, W, T = 1, *low_patch.shape
-        low_np  = np.transpose(low_patch .reshape((C, H, W, T)), (0, 3, 1, 2))
-        high_np = np.transpose(high_patch.reshape((C, H, W, T)), (0, 3, 1, 2))
+        # -------- 3. 打包 --------
+        low_np  = np.transpose(low_patch [None,...], (0,3,1,2))  # (1,T,H,W)
+        high_np = np.transpose(high_patch[None,...], (0,3,1,2))
 
         model_kwargs = {"low_res": low_np}
         if self.local_classes is not None:
             model_kwargs["y"] = np.array(self.local_classes[idx], dtype=np.int64)
 
-        return high_np, model_kwargs      # 只回傳 2-tuple
+        return high_np, model_kwargs
 
 def center_crop_arr(pil_image, image_size):
     # We are not on a new enough PIL to support the `reducing_gap`
