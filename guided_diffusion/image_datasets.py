@@ -185,10 +185,10 @@ class ImageDataset(Dataset):
                 raise ValueError(f"Unsupported TIFF shape {vol.shape}")
             low_vol  = low_vol .transpose(1, 2, 0) / 4.0    # -> (H,W,D)
             high_vol = high_vol.transpose(1, 2, 0) / 4.0
-        else:                                               # NPZ 分支
-            vol = np.load(path)["arr_0"].astype(np.float32) / 4.0  # (2,H,W,D)
-            low_vol  = vol[0]
-            high_vol = vol[1]
+        # else:                                               # NPZ 分支
+        #     vol = np.load(path)["arr_0"].astype(np.float32) / 4.0  # (2,H,W,D)
+        #     low_vol  = vol[0]
+        #     high_vol = vol[1]
 
         # -------- 2. 隨機裁剪 patch --------
         H, W, D   = low_vol.shape
