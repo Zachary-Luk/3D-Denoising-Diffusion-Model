@@ -10,6 +10,7 @@ import SimpleITK as sitk
 import numpy as np
 import torch
 
+
 def load_data(
     *,
     data_dir,
@@ -144,67 +145,281 @@ def _list_image_files_recursively(data_dir):
 
 class ImageDataset(Dataset):
     def __init__(self, resolution, image_paths, classes=None,
-                 shard=0, num_shards=1, **kwargs):
+                 shard=0, num_shards=1, use_non_overlapping=False, **kwargs):
         super().__init__()
         self.resolution = resolution
-        self.local_images  = image_paths[shard:][::num_shards]
+        self.local_images = image_paths[shard:][::num_shards]
         self.local_classes = None if classes is None else classes[shard:][::num_shards]
+        self.use_non_overlapping = use_non_overlapping
+        
+        if self.use_non_overlapping:
+            # 預先計算所有不重疊patch嘅位置
+            self._prepare_non_overlapping_patches()
+        
+    def _prepare_non_overlapping_patches(self):
+        """固定分割策略：XY軸3段有重疊，Z軸2段，重疊不超過80%"""
+        self.patch_info = []  # 每個元素：(file_idx, x_start, y_start, z_start)
+        self.volume_info = {}
+        
+        for file_idx, path in enumerate(self.local_images):
+            ext = os.path.splitext(path)[1].lower()
+            if ext in (".tif", ".tiff"):
+                try:
+                    # 讀取volume獲取尺寸
+                    vol = tifffile.imread(path)
+                    if vol.ndim == 3:  # (D,H,W)
+                        D, H, W = vol.shape
+                    elif vol.ndim == 4 and vol.shape[0] >= 2:  # (C,D,H,W)
+                        _, D, H, W = vol.shape
+                    else:
+                        continue
+                    
+                    # 轉置後嘅尺寸：(H,W,D)
+                    self.volume_info[file_idx] = (H, W, D)
+                    
+                    # 檢查volume是否足夠大
+                    if H < self.resolution or W < self.resolution or D < self.resolution:
+                        print(f"Warning: Volume {path} 太細 ({H}x{W}x{D}), 跳過")
+                        continue
+                    
+                    # 計算分割點，帶80%重疊保護
+                    x_starts = self._calculate_xy_starts(H)
+                    y_starts = self._calculate_xy_starts(W)
+                    z_starts = self._calculate_z_starts(D)
+                    
+                    # 生成所有patch組合
+                    for x_start in x_starts:
+                        for y_start in y_starts:
+                            for z_start in z_starts:
+                                self.patch_info.append((file_idx, x_start, y_start, z_start))
+                                
+                except Exception as e:
+                    print(f"Error processing {path}: {e}")
+                    continue
+
+    def _calculate_xy_starts(self, dim_size):
+        """計算XY軸起始點，帶80%重疊保護"""
+        patch_size = self.resolution  # 通常是80
+        overlap = 20  # 固定20 voxel重疊
+        stride = patch_size - overlap  # 80-20=60
+        max_overlap = int(patch_size * 0.8)  # 80%重疊閾值 = 64 voxels
+        
+        starts = []
+        
+        # 第一個patch: 0-80
+        starts.append(0)
+        
+        # 後續patches: 60-140, 120-200, ...
+        pos = stride  # 60
+        while pos + patch_size <= dim_size:
+            # 檢查與前一個patch嘅重疊
+            if starts:
+                prev_end = starts[-1] + patch_size
+                current_start = pos
+                overlap_size = max(0, prev_end - current_start)
+                
+                if overlap_size > max_overlap:
+                    pos += stride
+                    continue
+                    
+            starts.append(pos)
+            pos += stride
+        
+        # 如果最後一個patch沒有完全覆蓋到邊界，檢查是否可以添加
+        if starts:
+            last_end = starts[-1] + patch_size
+            if last_end < dim_size:
+                # 添加從末尾倒推嘅patch
+                last_start = dim_size - patch_size
+                if last_start > starts[-1]:  # 避免重複
+                    # 檢查重疊
+                    prev_end = starts[-1] + patch_size
+                    overlap_size = max(0, prev_end - last_start)
+                    
+                    if overlap_size <= max_overlap:
+                        starts.append(last_start)
+                        
+        return starts
+
+    def _calculate_z_starts(self, dim_size):
+        """計算Z軸起始點，帶80%重疊保護"""
+        patch_size = self.resolution  # 通常是80
+        max_overlap = int(patch_size * 0.8)  # 80%重疊閾值 = 64 voxels
+        
+        starts = [0]  # 第一個patch: 0-80
+        
+        if dim_size > patch_size:
+            # 第二個patch從末尾倒推: (D-80)-D
+            second_start = dim_size - patch_size
+            if second_start > 0:  # 確保不重複
+                # 檢查重疊
+                first_end = 0 + patch_size  # 第一個patch結束位置
+                overlap_size = max(0, first_end - second_start)
+                
+                if overlap_size <= max_overlap:
+                    starts.append(second_start)
+                    
+        return starts
 
     def __len__(self):
-        return len(self.local_images)
+        if self.use_non_overlapping:
+            return len(self.patch_info)
+        else:
+            return len(self.local_images)
 
     def __getitem__(self, idx):
-        path = self.local_images[idx]
-        ext  = os.path.splitext(path)[1].lower()
+        if self.use_non_overlapping:
+            return self._get_non_overlapping_patch(idx)
+        else:
+            return self._get_random_patch(idx)
+    
+    def _get_non_overlapping_patch(self, idx):
+        """獲取重疊分割嘅patch（無zero padding）"""
+        file_idx, x_start, y_start, z_start = self.patch_info[idx]
+        path = self.local_images[file_idx]
+        ext = os.path.splitext(path)[1].lower()
 
-        # -------- 1. 只處理 tiff --------
+        # -------- 1. 讀取數據 --------
         if ext in (".tif", ".tiff"):
             vol = tifffile.imread(path)
-            if vol.ndim == 3:                       # (D,H,W)
-                low_vol  = vol
+            if vol.ndim == 3:  # (D,H,W)
+                low_vol = vol
                 high_vol = vol
             elif vol.ndim == 4 and vol.shape[0] >= 2:  # (C,D,H,W)
                 low_vol, high_vol = vol[0], vol[1]
             else:
                 raise ValueError(f"Unsupported TIFF shape {vol.shape}")
-            low_vol  = low_vol .transpose(1, 2, 0) / 4
+            low_vol = low_vol.transpose(1, 2, 0) / 4   # (H,W,D)
+            high_vol = high_vol.transpose(1, 2, 0) / 4
+        else:
+            raise ValueError(f"Unsupported file type: {ext}")
+
+        # -------- 2. 提取patch（保證完整尺寸） --------
+        H, W, D = low_vol.shape
+        
+        # 計算結束位置
+        x_end = x_start + self.resolution
+        y_end = y_start + self.resolution
+        z_end = z_start + self.resolution
+        
+        # 確保不超出邊界（理論上應該不會，因為我哋已經計算好）
+        x_end = min(x_end, H)
+        y_end = min(y_end, W)
+        z_end = min(z_end, D)
+        
+        low_patch = low_vol[x_start:x_end, y_start:y_end, z_start:z_end]
+        high_patch = high_vol[x_start:x_end, y_start:y_end, z_start:z_end]
+
+        # -------- 3. 驗證patch尺寸（應該係完整嘅） --------
+        expected_shape = (self.resolution, self.resolution, self.resolution)
+        if low_patch.shape != expected_shape:
+            # 如果真的有問題，用padding補救（但這應該很少發生）
+            pad_low = np.zeros(expected_shape, dtype=np.float32)
+            pad_high = np.zeros(expected_shape, dtype=np.float32)
+            
+            h, w, d = low_patch.shape
+            pad_low[:h, :w, :d] = low_patch
+            pad_high[:h, :w, :d] = high_patch
+            
+            low_patch = pad_low
+            high_patch = pad_high
+
+        # -------- 4. 打包 --------
+        low_np = np.transpose(low_patch[None, ...], (0, 3, 1, 2))  # (1,T,H,W)
+        high_np = np.transpose(high_patch[None, ...], (0, 3, 1, 2))
+
+        model_kwargs = {"low_res": low_np}
+        if self.local_classes is not None:
+            model_kwargs["y"] = np.array(self.local_classes[file_idx], dtype=np.int64)
+
+        return high_np, model_kwargs
+    
+    def _get_random_patch(self, idx):
+        """原來嘅隨機裁剪邏輯（oversampling）"""
+        path = self.local_images[idx]
+        ext = os.path.splitext(path)[1].lower()
+
+        # -------- 1. 只處理 tiff --------
+        if ext in (".tif", ".tiff"):
+            vol = tifffile.imread(path)
+            if vol.ndim == 3:  # (D,H,W)
+                low_vol = vol
+                high_vol = vol
+            elif vol.ndim == 4 and vol.shape[0] >= 2:  # (C,D,H,W)
+                low_vol, high_vol = vol[0], vol[1]
+            else:
+                raise ValueError(f"Unsupported TIFF shape {vol.shape}")
+            low_vol = low_vol.transpose(1, 2, 0) / 4
             high_vol = high_vol.transpose(1, 2, 0) / 4
         else:
             raise ValueError(f"Unsupported file type: {ext}")
 
         # -------- 2. 隨機裁剪 --------
-        H, W, D   = low_vol.shape
-        size_xy   = min(self.resolution, H, W)
-        size_z    = min(self.resolution, D)
+        H, W, D = low_vol.shape
+        size_xy = min(self.resolution, H, W)
+        size_z = min(self.resolution, D)
 
-        rand_x = np.random.randint(0, max(H-size_xy,0)+1)
-        rand_y = np.random.randint(0, max(W-size_xy,0)+1)
-        rand_z = np.random.randint(0, max(D-size_z ,0)+1)
+        rand_x = np.random.randint(0, max(H-size_xy, 0)+1)
+        rand_y = np.random.randint(0, max(W-size_xy, 0)+1)
+        rand_z = np.random.randint(0, max(D-size_z, 0)+1)
 
-        low_patch  = low_vol [rand_x:rand_x+size_xy,
-                              rand_y:rand_y+size_xy,
-                              rand_z:rand_z+size_z]
+        low_patch = low_vol[rand_x:rand_x+size_xy,
+                           rand_y:rand_y+size_xy,
+                           rand_z:rand_z+size_z]
         high_patch = high_vol[rand_x:rand_x+size_xy,
-                              rand_y:rand_y+size_xy,
-                              rand_z:rand_z+size_z]
+                             rand_y:rand_y+size_xy,
+                             rand_z:rand_z+size_z]
 
         if low_patch.shape != (size_xy, size_xy, size_z):
-            pad_low  = np.zeros((size_xy, size_xy, size_z), np.float32)
+            pad_low = np.zeros((size_xy, size_xy, size_z), np.float32)
             pad_high = np.zeros_like(pad_low)
-            h,w,d = low_patch.shape
-            pad_low [:h,:w,:d] = low_patch
-            pad_high[:h,:w,:d] = high_patch
+            h, w, d = low_patch.shape
+            pad_low[:h, :w, :d] = low_patch
+            pad_high[:h, :w, :d] = high_patch
             low_patch, high_patch = pad_low, pad_high
 
         # -------- 3. 打包 --------
-        low_np  = np.transpose(low_patch [None,...], (0,3,1,2))  # (1,T,H,W)
-        high_np = np.transpose(high_patch[None,...], (0,3,1,2))
+        low_np = np.transpose(low_patch[None, ...], (0, 3, 1, 2))  # (1,T,H,W)
+        high_np = np.transpose(high_patch[None, ...], (0, 3, 1, 2))
 
         model_kwargs = {"low_res": low_np}
         if self.local_classes is not None:
             model_kwargs["y"] = np.array(self.local_classes[idx], dtype=np.int64)
 
         return high_np, model_kwargs
+
+    def get_overlap_stats(self):
+        """顯示重疊分割統計信息"""
+        if not self.use_non_overlapping:
+            print("只在 use_non_overlapping=True 時可用")
+            return
+            
+        print(f"重疊分割模式 (patch size: {self.resolution}x{self.resolution}x{self.resolution}):")
+        print(f"重疊保護: 最大允許重疊 {int(self.resolution * 0.8)} voxels (80%)")
+        
+        for file_idx, (H, W, D) in self.volume_info.items():
+            x_starts = self._calculate_xy_starts(H)
+            y_starts = self._calculate_xy_starts(W)
+            z_starts = self._calculate_z_starts(D)
+            
+            total_patches = len(x_starts) * len(y_starts) * len(z_starts)
+            
+            print(f"Volume {file_idx} ({H}x{W}x{D}): {total_patches} patches")
+            print(f"  X軸: {len(x_starts)} patches at {x_starts}")
+            print(f"  Y軸: {len(y_starts)} patches at {y_starts}")
+            print(f"  Z軸: {len(z_starts)} patches at {z_starts}")
+            
+            # 計算實際重疊
+            if len(x_starts) > 1:
+                x_overlaps = []
+                for i in range(len(x_starts)-1):
+                    overlap = (x_starts[i] + self.resolution) - x_starts[i+1]
+                    x_overlaps.append(overlap)
+                print(f"  X軸重疊: {x_overlaps} voxels")
+                
+            if len(z_starts) > 1:
+                z_overlap = (z_starts[0] + self.resolution) - z_starts[1]
+                print(f"  Z軸重疊: {z_overlap} voxels")
 
 def center_crop_arr(pil_image, image_size):
     # We are not on a new enough PIL to support the `reducing_gap`
