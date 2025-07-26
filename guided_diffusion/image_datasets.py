@@ -145,12 +145,12 @@ def _list_image_files_recursively(data_dir):
 
 class ImageDataset(Dataset):
     def __init__(self, resolution, image_paths, classes=None,
-                 shard=0, num_shards=1, use_non_overlapping=False, **kwargs):
+                shard=0, num_shards=1, **kwargs):
         super().__init__()
         self.resolution = resolution
         self.local_images = image_paths[shard:][::num_shards]
         self.local_classes = None if classes is None else classes[shard:][::num_shards]
-        self.use_non_overlapping = use_non_overlapping
+        self.use_non_overlapping = True  # 直接在這裡設置為 True
         
         if self.use_non_overlapping:
             # 預先計算所有不重疊patch嘅位置
