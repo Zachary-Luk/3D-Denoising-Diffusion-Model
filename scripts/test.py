@@ -150,6 +150,7 @@ def main():
 def load_data_for_worker(base_samples, batch_size, class_cond, resolution):
     if not base_samples.endswith(('.tif', '.tiff')):
         logger.log("Unsupported file type")
+        yield None
         return
 
     vol = tifffile.imread(base_samples)
@@ -159,10 +160,12 @@ def load_data_for_worker(base_samples, batch_size, class_cond, resolution):
         _, D, H, W = vol.shape
     else:
         logger.log("Unsupported TIFF format")
+        yield None
         return
 
     if H < resolution or W < resolution or D < resolution:
         logger.log(f"Volume too small ({H}x{W}x{D}), skipping")
+        yield None
         return
 
     vol[vol > 4] = 4
@@ -171,6 +174,9 @@ def load_data_for_worker(base_samples, batch_size, class_cond, resolution):
     x_starts = _calculate_xy_starts(H, resolution)
     y_starts = _calculate_xy_starts(W, resolution)
     z_starts = _calculate_z_starts(D, resolution)
+
+    total_patches = len(x_starts) * len(y_starts) * len(z_starts)
+    logger.log(f"Total expected patches: {total_patches}")
 
     image_arr = []
     for x_start in x_starts:
@@ -193,20 +199,10 @@ def load_data_for_worker(base_samples, batch_size, class_cond, resolution):
         rank = 0
         num_ranks = 1
 
-    logger.log(f'rank:{rank}, num_ranks:{num_ranks}, total patches: {len(image_arr)}')
-
-    # 【修正】簡單遍歷所有 patches，每 batch_size 個 yield 一次
-    for start in range(0, len(image_arr), batch_size):
-        end = start + batch_size
-        batch_patches = image_arr[start:end]
-        if len(batch_patches) == 0:
-            break
-
-        # 如果不足 batch_size，用 padding 補齊（但通常 batch_size=1 唔使）
-        while len(batch_patches) < batch_size:
-            batch_patches = np.append(batch_patches, [batch_patches[-1]], axis=0)
-
-        batch = th.from_numpy(batch_patches).float().permute(0, 3, 1, 2).unsqueeze(1)
+    # 只處理屬於此 rank 的 patches
+    for i in range(rank, len(image_arr), num_ranks):
+        batch_patches = [image_arr[i]]
+        batch = th.from_numpy(np.stack(batch_patches)).float().permute(0, 3, 1, 2).unsqueeze(1)
         yield dict(low_res=batch)
 
 def create_argparser():
