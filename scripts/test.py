@@ -36,14 +36,12 @@ def main():
     model.eval()
 
     logger.log("loading data...")
-    # 【修改】將 data 命名為 data_generator，更清晰
     data_generator = load_data_for_worker(args.base_samples, args.batch_size, args.class_cond, args.large_size)
     logger.log("creating samples...")
     all_images = []
 
     device = th.device("cuda" if th.cuda.is_available() else "cpu")
 
-    # 【修改】用 for loop 遍歷生成器，避免無限循環
     for model_kwargs in data_generator:
         if model_kwargs is None:
             continue
@@ -69,7 +67,6 @@ def main():
         sample = sample.permute(0, 1, 3, 4, 2)
         sample = sample.contiguous()
 
-        # Handle single GPU vs multi-GPU
         if dist.is_initialized() and dist.get_world_size() > 1:
             all_samples_dist = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
             dist.all_gather(all_samples_dist, sample)
@@ -86,7 +83,6 @@ def main():
 
     arr = np.concatenate(all_images, axis=0)
 
-    # 根據輸入類型處理輸出
     if args.base_samples.endswith('.tif') or args.base_samples.endswith('.tiff'):
         logger.log("Processing TIFF output...")
 
@@ -105,7 +101,7 @@ def main():
             
             patch_idx = 0
             total_patches = len(x_starts) * len(y_starts) * len(z_starts)
-            arr = arr[:total_patches] # 確保 arr 數量同 patches 匹配
+            arr = arr[:total_patches]  # 確保 arr 數量同 patches 匹配
 
             for x_start in x_starts:
                 for y_start in y_starts:
@@ -116,7 +112,6 @@ def main():
                             y_end = min(y_start + resolution, original_width)
                             z_end = min(z_start + resolution, original_depth)
                             
-                            # 確保 patch 尺寸正確
                             patch_slice = patch[0:x_end-x_start, 0:y_end-y_start, 0:z_end-z_start]
                             arr_result[x_start:x_end, y_start:y_end, z_start:z_end] += patch_slice
                             count_arr[x_start:x_end, y_start:y_end, z_start:z_end] += 1
@@ -129,7 +124,6 @@ def main():
             logger.log(f"Reconstruction failed: {e}")
             arr_result = arr[0] if len(arr) > 0 else np.zeros((args.large_size, args.large_size, args.large_size))
     else:
-        # NPZ 處理
         logger.log("Processing NPZ output...")
         arr_result = np.zeros((192,288,576))
         index = 0
@@ -137,7 +131,6 @@ def main():
             arr_result[:, :, i*96:(i+1)*96] = arr[index,:,:,:]
             index += 1
 
-    # Handle single GPU vs multi-GPU for saving
     if not dist.is_initialized() or dist.get_rank() == 0:
         shape_str = "x".join([str(x) for x in arr_result.shape])
         out_path = os.path.join(logger.get_dir(), f"samples_{os.path.basename(args.base_samples).replace('.tif', '')}.npz")
@@ -202,18 +195,18 @@ def load_data_for_worker(base_samples, batch_size, class_cond, resolution):
 
     logger.log(f'rank:{rank}, num_ranks:{num_ranks}, total patches: {len(image_arr)}')
 
-    buffer = []
-    # 【修改】用 for loop 代替 while True:
-    for i in range(rank, len(image_arr), num_ranks):
-        buffer.append(image_arr[i])
-        if len(buffer) == batch_size:
-            batch = th.from_numpy(np.stack(buffer)).float().permute(0, 3, 1, 2).unsqueeze(1)
-            yield dict(low_res=batch)
-            buffer = []
-    
-    # 【新增】處理最後剩餘嘅 buffer
-    if buffer:
-        batch = th.from_numpy(np.stack(buffer)).float().permute(0, 3, 1, 2).unsqueeze(1)
+    # 【修正】簡單遍歷所有 patches，每 batch_size 個 yield 一次
+    for start in range(0, len(image_arr), batch_size):
+        end = start + batch_size
+        batch_patches = image_arr[start:end]
+        if len(batch_patches) == 0:
+            break
+
+        # 如果不足 batch_size，用 padding 補齊（但通常 batch_size=1 唔使）
+        while len(batch_patches) < batch_size:
+            batch_patches = np.append(batch_patches, [batch_patches[-1]], axis=0)
+
+        batch = th.from_numpy(batch_patches).float().permute(0, 3, 1, 2).unsqueeze(1)
         yield dict(low_res=batch)
 
 def create_argparser():
