@@ -116,7 +116,9 @@ def main():
                 for y_start in y_starts:
                     for z_start in z_starts:
                         if patch_idx < len(arr):
-                            patch = arr[patch_idx][0, 0]
+                            patch = np.squeeze(arr[patch_idx])  # Use squeeze to handle variable single dimensions, ensure 3D
+                            if patch.ndim != 3:
+                                raise ValueError(f"Patch {patch_idx} has unexpected dimensions: {patch.shape}")
                             x_end = min(x_start + resolution, original_height)
                             y_end = min(y_start + resolution, original_width)
                             z_end = min(z_start + resolution, original_depth)
@@ -136,7 +138,12 @@ def main():
 
         except Exception as e:
             logger.log(f"Reconstruction failed: {e}")
-            arr_result = arr[0][0, 0] if len(arr) > 0 else np.zeros((original_height, original_width, original_depth))
+            if len(arr) > 0:
+                arr_result = np.squeeze(arr[0])
+                if arr_result.ndim != 3:
+                    arr_result = np.zeros((args.large_size, args.large_size, args.large_size))  # Fallback to 3D zero array if squeeze fails
+            else:
+                arr_result = np.zeros((args.large_size, args.large_size, args.large_size))
     else:
         logger.log("Processing NPZ output...")
         # Comment out hardcoded NPZ for user's data; fallback to approximate or first patch
@@ -145,7 +152,12 @@ def main():
         # for i in range(6):
         #     arr_result[:, :, i*96:(i+1)*96] = arr[index,:,:,:]
         #     index += 1
-        arr_result = arr[0][0, 0] if len(arr) > 0 else np.zeros((200, 200, 100))  # Approximate for 200x200x100
+        if len(arr) > 0:
+            arr_result = np.squeeze(arr[0])
+            if arr_result.ndim != 3:
+                arr_result = np.zeros((args.large_size, args.large_size, args.large_size))  # Fallback to 3D zero array
+        else:
+            arr_result = np.zeros((args.large_size, args.large_size, args.large_size))
 
     if not dist.is_initialized() or dist.get_rank() == 0:
         shape_str = "x".join([str(x) for x in arr_result.shape])
@@ -155,7 +167,11 @@ def main():
         
         if args.base_samples.endswith('.tif') or args.base_samples.endswith('.tiff'):
             tiff_out_path = out_path.replace('.npz', '.tif')
-            tiff_data = arr_result.transpose(2, 0, 1)
+            if arr_result.ndim == 3:
+                tiff_data = arr_result.transpose(2, 0, 1)
+            else:
+                logger.log("Skipping TIFF save due to incorrect dimensions")
+                return
             tifffile.imwrite(tiff_out_path, tiff_data.astype(np.float32))
             logger.log(f"Also saved as TIFF: {tiff_out_path}")
 
@@ -174,6 +190,10 @@ def load_data_for_worker(base_samples, batch_size, class_cond, resolution):
         D, H, W = vol.shape
     elif vol.ndim == 4 and vol.shape[0] >= 2:
         _, D, H, W = vol.shape
+        if vol.shape[0] == 1:
+            vol = vol[0]  # Reduce to 3D if single channel
+        else:
+            raise ValueError("Multi-channel TIFF not supported; expected single channel")
     else:
         logger.log("Unsupported TIFF format")
         yield None
@@ -268,24 +288,10 @@ def _calculate_xy_starts(dim_size, patch_size):
     return starts
 
 def _calculate_z_starts(dim_size, patch_size):
-    # Generalized to match _calculate_xy_starts for consistent overlapping in Z
-    overlap = 20
-    stride = patch_size - overlap
-    max_overlap = int(patch_size * 0.8)
     starts = [0]
-    pos = stride
-    while pos + patch_size <= dim_size:
-        if starts:
-            prev_end = starts[-1] + patch_size
-            if max(0, prev_end - pos) > max_overlap:
-                pos += stride
-                continue
-        starts.append(pos)
-        pos += stride
-    if starts and starts[-1] + patch_size < dim_size:
+    if dim_size > patch_size:
         last_start = dim_size - patch_size
-        if last_start > starts[-1] and max(0, starts[-1] + patch_size - last_start) <= max_overlap:
-            starts.append(last_start)
+        starts.append(last_start)  # 強制加 last_start，只要 dim_size > patch_size，就分 2 個 patches，唔理 overlap
     return starts
 
 if __name__ == "__main__":
