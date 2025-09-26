@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import tifffile
 import blobfile as bf
 import numpy as np
@@ -56,12 +57,20 @@ def main():
             th.manual_seed(10)
         noise = th.randn(*shape, device=device)
 
-        sample = diffusion.p_sample_loop(
+        if args.use_ddim:
+            sample_fn = diffusion.ddim_sample_loop
+            extra_args = dict(eta=args.eta)
+        else:
+            sample_fn = diffusion.p_sample_loop
+            extra_args = {}
+
+        sample = sample_fn(
             model,
             shape,
             noise,
             clip_denoised=args.clip_denoised,
             model_kwargs=model_kwargs,
+            **extra_args,
         )
 
         sample = sample.permute(0, 1, 3, 4, 2)
@@ -107,29 +116,36 @@ def main():
                 for y_start in y_starts:
                     for z_start in z_starts:
                         if patch_idx < len(arr):
-                            patch = arr[patch_idx]
+                            patch = arr[patch_idx][0, 0]
                             x_end = min(x_start + resolution, original_height)
                             y_end = min(y_start + resolution, original_width)
                             z_end = min(z_start + resolution, original_depth)
                             
-                            patch_slice = patch[0:x_end-x_start, 0:y_end-y_start, 0:z_end-z_start]
+                            hx = x_end - x_start
+                            wy = y_end - y_start
+                            dz = z_end - z_start
+                            
+                            patch_slice = patch[0:hx, 0:wy, 0:dz]
                             arr_result[x_start:x_end, y_start:y_end, z_start:z_end] += patch_slice
                             count_arr[x_start:x_end, y_start:y_end, z_start:z_end] += 1
                             patch_idx += 1
             
             arr_result = np.divide(arr_result, count_arr, where=count_arr != 0)
-            logger.log(f"Reconstruction complete: final shape {arr_result.shape}")
+            overlap_regions = np.sum(count_arr > 1)
+            logger.log(f"Reconstruction complete: final shape {arr_result.shape}, overlapped pixels: {overlap_regions}")
 
         except Exception as e:
             logger.log(f"Reconstruction failed: {e}")
-            arr_result = arr[0] if len(arr) > 0 else np.zeros((args.large_size, args.large_size, args.large_size))
+            arr_result = arr[0][0, 0] if len(arr) > 0 else np.zeros((original_height, original_width, original_depth))
     else:
         logger.log("Processing NPZ output...")
-        arr_result = np.zeros((192,288,576))
-        index = 0
-        for i in range(6):
-            arr_result[:, :, i*96:(i+1)*96] = arr[index,:,:,:]
-            index += 1
+        # Comment out hardcoded NPZ for user's data; fallback to approximate or first patch
+        # arr_result = np.zeros((192,288,576))  # Remove hardcoded
+        # index = 0
+        # for i in range(6):
+        #     arr_result[:, :, i*96:(i+1)*96] = arr[index,:,:,:]
+        #     index += 1
+        arr_result = arr[0][0, 0] if len(arr) > 0 else np.zeros((200, 200, 100))  # Approximate for 200x200x100
 
     if not dist.is_initialized() or dist.get_rank() == 0:
         shape_str = "x".join([str(x) for x in arr_result.shape])
@@ -163,10 +179,15 @@ def load_data_for_worker(base_samples, batch_size, class_cond, resolution):
         yield None
         return
 
-    if H < resolution or W < resolution or D < resolution:
-        logger.log(f"Volume too small ({H}x{W}x{D}), skipping")
+    # Remove D < resolution check to handle small Z; keep for XY if too small
+    if H < resolution or W < resolution:
+        logger.log(f"XY too small ({H}x{W}), skipping")
         yield None
         return
+
+    # Handle small Z by padding individual patches (no skip)
+    if D < resolution:
+        logger.log(f"Z too small ({D}), will pad patches to {resolution}")
 
     vol[vol > 4] = 4
     vol = vol / 4.0
@@ -176,7 +197,7 @@ def load_data_for_worker(base_samples, batch_size, class_cond, resolution):
     z_starts = _calculate_z_starts(D, resolution)
 
     total_patches = len(x_starts) * len(y_starts) * len(z_starts)
-    logger.log(f"Total expected patches: {total_patches}")
+    logger.log(f"Total expected patches: {total_patches} (X: {len(x_starts)}, Y: {len(y_starts)}, Z: {len(z_starts)})")
 
     image_arr = []
     for x_start in x_starts:
@@ -187,8 +208,13 @@ def load_data_for_worker(base_samples, batch_size, class_cond, resolution):
                 z_end = min(z_start + resolution, D)
                 patch = vol[z_start:z_end, x_start:x_end, y_start:y_end]
                 padded_patch = np.zeros((resolution, resolution, resolution))
-                padded_patch[:patch.shape[0], :patch.shape[1], :patch.shape[2]] = patch
-                image_arr.append(padded_patch.transpose(1, 2, 0))
+                # Pad dimensions: assuming padded_patch as (dz_pad, hx_pad, wy_pad) -> but actually (Z_patch, H_patch, W_patch)
+                # patch.shape = (dz, hx, wy)
+                dz_actual = patch.shape[0]
+                hx_actual = patch.shape[1]
+                wy_actual = patch.shape[2]
+                padded_patch[:dz_actual, :hx_actual, :wy_actual] = patch
+                image_arr.append(padded_patch.transpose(1, 2, 0))  # (hx_pad, wy_pad, dz_pad) -> (H,W,Z) for model
 
     image_arr = np.array(image_arr)
 
@@ -212,6 +238,7 @@ def create_argparser():
         num_samples=10000,
         batch_size=1,
         use_ddim=False,
+        eta=0.0,  # Added for DDIM eta control
         base_samples="",
         model_path="",
     )
@@ -241,12 +268,24 @@ def _calculate_xy_starts(dim_size, patch_size):
     return starts
 
 def _calculate_z_starts(dim_size, patch_size):
+    # Generalized to match _calculate_xy_starts for consistent overlapping in Z
+    overlap = 20
+    stride = patch_size - overlap
     max_overlap = int(patch_size * 0.8)
     starts = [0]
-    if dim_size > patch_size:
-        second_start = dim_size - patch_size
-        if second_start > 0 and max(0, patch_size - second_start) <= max_overlap:
-            starts.append(second_start)
+    pos = stride
+    while pos + patch_size <= dim_size:
+        if starts:
+            prev_end = starts[-1] + patch_size
+            if max(0, prev_end - pos) > max_overlap:
+                pos += stride
+                continue
+        starts.append(pos)
+        pos += stride
+    if starts and starts[-1] + patch_size < dim_size:
+        last_start = dim_size - patch_size
+        if last_start > starts[-1] and max(0, starts[-1] + patch_size - last_start) <= max_overlap:
+            starts.append(last_start)
     return starts
 
 if __name__ == "__main__":
