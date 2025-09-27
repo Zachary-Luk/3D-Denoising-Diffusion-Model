@@ -109,7 +109,7 @@ def main():
     logger.log("Denoising complete - check the two TIFF files for comparison")
 
 def load_single_patch(base_samples, resolution):
-    """載入並提取中心 patch"""
+    """載入並提取中心 patch - 無正規化版本"""
     if not base_samples.endswith(('.tif', '.tiff')):
         logger.log("Unsupported file type")
         return None
@@ -127,11 +127,9 @@ def load_single_patch(base_samples, resolution):
     D, H, W = vol.shape
     logger.log(f"3D volume: D={D}, H={H}, W={W}")
     
-    # 正規化
-    logger.log(f"Original stats - min: {vol.min():.4f}, max: {vol.max():.4f}, std: {vol.std():.4f}")
-    vol[vol > 4] = 4
-    vol = vol / 4.0
-    logger.log(f"After normalization - min: {vol.min():.4f}, max: {vol.max():.4f}, std: {vol.std():.4f}")
+    # 直接用原始數據，只確保 float32 類型
+    vol = vol.astype(np.float32)
+    logger.log(f"Using original data without normalization - min: {vol.min():.4f}, max: {vol.max():.4f}, mean: {vol.mean():.4f}, std: {vol.std():.4f}")
     
     # 提取中心 patch
     z_center = D // 2
@@ -146,7 +144,7 @@ def load_single_patch(base_samples, resolution):
     w_end = min(W, w_start + resolution)
     
     patch = vol[z_start:z_end, h_start:h_end, w_start:w_end]
-    logger.log(f"Extracted patch shape: {patch.shape}")
+    logger.log(f"Extracted patch shape: {patch.shape} from center ({z_start}:{z_end}, {h_start}:{h_end}, {w_start}:{w_end})")
     
     # Pad 到標準尺寸
     padded_patch = np.zeros((resolution, resolution, resolution), dtype=np.float32)
@@ -156,6 +154,7 @@ def load_single_patch(base_samples, resolution):
     # 轉為 (H,W,Z) 格式
     result_patch = padded_patch.transpose(1, 2, 0)  # (Z,H,W) -> (H,W,Z)
     logger.log(f"Final patch shape: {result_patch.shape}")
+    logger.log(f"Final patch stats - min: {result_patch.min():.4f}, max: {result_patch.max():.4f}, mean: {result_patch.mean():.4f}, std: {result_patch.std():.4f}")
     
     return result_patch
 
