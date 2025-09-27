@@ -41,10 +41,9 @@ def main():
     logger.log("creating samples...")
     all_images = []
 
-    device = th.device("cuda" if th.cuda.is_available() else "cpu")
-
     # 全局种子，只设一次
-    if device.type == "cuda":
+    dev = dist_util.dev()
+    if dev.type == "cuda":
         th.cuda.manual_seed_all(42)
     else:
         th.manual_seed(42)
@@ -54,122 +53,38 @@ def main():
         if model_kwargs is None:
             continue
 
-        model_kwargs = {k: v.to(dist_util.dev()) for k, v in model_kwargs.items()}
+        model_kwargs = {k: v.to(dev) for k, v in model_kwargs.items()}
 
-        # 获取 noisy input 作为起始点
-        noisy_input = model_kwargs['low_res']  # (B, C, H, W, D) - 你的 noisy patch
-        batch_size = noisy_input.shape[0]
-        logger.log(f"Noisy input shape: {noisy_input.shape}")
-        logger.log(f"Noisy input stats - min: {noisy_input.min():.4f}, max: {noisy_input.max():.4f}, mean: {noisy_input.mean():.4f}, std: {noisy_input.std():.4f}")
+        # 直接用庫內置的 DDPM/DDIM 取樣，由噪聲起步，low_res 作條件
+        shape = model_kwargs['low_res'].shape  # (B, 1, Z, H, W)
+        logger.log(f"Sampling with shape={shape}")
+        logger.log(f"Low_res input stats - min: {model_kwargs['low_res'].min():.4f}, max: {model_kwargs['low_res'].max():.4f}, mean: {model_kwargs['low_res'].mean():.4f}, std: {model_kwargs['low_res'].std():.4f}")
 
-        # 重要：自定义 denoising loop，从 noisy_input 开始
-        logger.log("Starting custom denoising process...")
+        if args.use_ddim:
+            logger.log(f"Using DDIM with eta={args.eta}")
+            sample = diffusion.ddim_sample_loop(
+                model,
+                shape,
+                clip_denoised=args.clip_denoised,
+                model_kwargs=model_kwargs,
+                eta=args.eta,
+            )
+        else:
+            logger.log("Using standard DDPM sampling")
+            sample = diffusion.p_sample_loop(
+                model,
+                shape,
+                clip_denoised=args.clip_denoised,
+                model_kwargs=model_kwargs,
+            )
+
+        logger.log(f"Sample output stats - min: {sample.min():.4f}, max: {sample.max():.4f}, mean: {sample.mean():.4f}, std: {sample.std():.4f}")
+        logger.log(f"Sample output shape before permute: {sample.shape}")  # (B,1,Z,H,W)
         
-        with th.no_grad():
-            # 起始点：你的 noisy patch
-            x = noisy_input.clone()
-            
-            # 根据输入噪声水平选择起始 timestep
-            input_std = th.std(noisy_input).item()
-            if input_std > 0.15:  # 高噪声
-                start_t = diffusion.num_timesteps - 1
-                logger.log(f"High noise detected (std={input_std:.4f}), starting from timestep {start_t}")
-            elif input_std > 0.08:  # 中等噪声
-                start_t = diffusion.num_timesteps // 2
-                logger.log(f"Medium noise detected (std={input_std:.4f}), starting from timestep {start_t}")
-            else:  # 低噪声
-                start_t = diffusion.num_timesteps // 4
-                logger.log(f"Low noise detected (std={input_std:.4f}), starting from timestep {start_t}")
-            
-            # Denoising loop：从 start_t 倒数到 0
-            for i in reversed(range(0, start_t + 1)):
-                t = th.full((batch_size,), i, device=device, dtype=th.long)
-                
-                # 模型预测 noise
-                try:
-                    # 方法1：使用 p_mean_variance（推荐）
-                    pred = diffusion.p_mean_variance(
-                        model, x, t, 
-                        clip_denoised=args.clip_denoised,
-                        model_kwargs=model_kwargs
-                    )
-                    mean = pred['mean']
-                    logvar = pred['logvar']
-                    model_output = pred.get('pred_xstart', mean)  # 获取预测的 x0 或使用 mean
-                    
-                except Exception as e:
-                    # 方法2：直接调用模型（备用）
-                    logger.log(f"Using direct model call due to error: {e}")
-                    model_output = model(x, t, **model_kwargs)
-                    mean = model_output
-                    logvar = th.zeros_like(mean)
-                
-                # 执行 denoising step
-                if i > 0:
-                    if args.use_ddim:
-                        # DDIM step (deterministic)
-                        try:
-                            alpha_bar = diffusion.alphas_cumprod[i]
-                            alpha_bar_prev = diffusion.alphas_cumprod[i-1] if i > 0 else th.tensor(1.0, device=device)
-                            
-                            # 确保维度匹配 (5D tensor)
-                            alpha_bar = alpha_bar.view(1, 1, 1, 1, 1)
-                            alpha_bar_prev = alpha_bar_prev.view(1, 1, 1, 1, 1)
-                            
-                            # DDIM 公式
-                            pred_x0 = (x - th.sqrt(1 - alpha_bar) * model_output) / th.sqrt(alpha_bar)
-                            if args.clip_denoised:
-                                pred_x0 = pred_x0.clamp(-1, 1)
-                            
-                            # 计算 x_{t-1}
-                            dir_xt = th.sqrt(1 - alpha_bar_prev) * model_output
-                            noise = th.randn_like(x) * args.eta if args.eta > 0 else 0
-                            x = th.sqrt(alpha_bar_prev) * pred_x0 + dir_xt + noise
-                            
-                        except Exception as ddim_error:
-                            # DDIM 失败，fallback 到 DDPM
-                            logger.log(f"DDIM failed, using DDPM: {ddim_error}")
-                            noise = th.randn_like(x)
-                            x = mean + th.exp(0.5 * logvar) * noise
-                    else:
-                        # DDPM step (stochastic)
-                        noise = th.randn_like(x)
-                        x = mean + th.exp(0.5 * logvar) * noise
-                else:
-                    # 最后一步：直接用 mean，无噪声
-                    x = mean
-                
-                # 进度日志
-                if i % 100 == 0 or i < 10:
-                    current_std = th.std(x).item()
-                    logger.log(f"Denoising step {i}: x stats - min: {x.min():.4f}, max: {x.max():.4f}, mean: {x.mean():.4f}, std: {current_std:.4f}")
-            
-            # 最终结果
-            sample = x
-            final_std = th.std(sample).item()
-            logger.log(f"Denoising complete! Final stats - min: {sample.min():.4f}, max: {sample.max():.4f}, mean: {sample.mean():.4f}, std: {final_std:.4f}")
-            
-            # 比较输入输出的噪声水平
-            noise_reduction = (input_std - final_std) / input_std * 100 if input_std > 0 else 0
-            logger.log(f"Noise reduction: input std = {input_std:.4f}, output std = {final_std:.4f}, reduction = {noise_reduction:.1f}%")
-            
-            if noise_reduction > 10:
-                logger.log("✓ Successful denoising detected!")
-            elif noise_reduction > 0:
-                logger.log("~ Mild denoising detected")
-            else:
-                logger.log("✗ No denoising or noise increased - check model/parameters")
-
-        # 维度调整（保持原有逻辑，但检查是否需要）
-        logger.log(f"Sample output shape before permute: {sample.shape}")
-        
-        # 注意：可能不需要 permute，取决于你的 reconstruction 期望的维度
-        # 如果 reconstruction 出错，试试注释掉下面两行
-        sample = sample.permute(0, 1, 3, 4, 2)  # (B,C,H,W,D) -> (B,C,W,D,H) 
-        sample = sample.contiguous()
+        # 跟你重建程式一致：(B,1,Z,H,W) -> (B,1,H,W,Z)
+        sample = sample.permute(0, 1, 3, 4, 2).contiguous()
         logger.log(f"Sample output shape after permute: {sample.shape}")
 
-        # 分布式处理（保持原有逻辑）
         if dist.is_initialized() and dist.get_world_size() > 1:
             all_samples_dist = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
             dist.all_gather(all_samples_dist, sample)
@@ -178,7 +93,7 @@ def main():
         else:
             all_images.append(sample.cpu().numpy())
 
-        logger.log(f"created {len(all_images)} denoised samples")
+        logger.log(f"created {len(all_images)} samples")
 
     if not all_images:
         logger.log("No samples were generated. Exiting.")
@@ -347,6 +262,7 @@ def load_data_for_worker(base_samples, batch_size, class_cond, resolution):
     # 添加数据预处理的调试信息
     logger.log(f"Original data stats - min: {vol.min():.4f}, max: {vol.max():.4f}, mean: {vol.mean():.4f}, std: {vol.std():.4f}")
     
+    # 保持你現有的正規化（如訓練時用前景 Z-score，請替換下面兩行）
     vol[vol > 4] = 4
     vol = vol / 4.0
     
