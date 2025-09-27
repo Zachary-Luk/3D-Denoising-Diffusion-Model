@@ -117,7 +117,7 @@ def main():
             resolution = args.large_size
             x_starts = _calculate_xy_starts_fixed(original_height, resolution, num_patches=3)
             y_starts = _calculate_xy_starts_fixed(original_width, resolution, num_patches=3)
-            z_starts = _calculate_z_starts_with_overlap(original_depth, resolution, overlap=20)
+            z_starts = _calculate_z_starts_with_overlap(original_depth, resolution)
             
             logger.log(f"X starts: {x_starts}")  # Debug: 顯示分割位置
             logger.log(f"Y starts: {y_starts}")
@@ -239,7 +239,7 @@ def load_data_for_worker(base_samples, batch_size, class_cond, resolution):
 
     x_starts = _calculate_xy_starts_fixed(H, resolution, num_patches=3)
     y_starts = _calculate_xy_starts_fixed(W, resolution, num_patches=3)
-    z_starts = _calculate_z_starts_with_overlap(D, resolution, overlap=20)
+    z_starts = _calculate_z_starts_with_overlap(D, resolution)
 
     total_patches = len(x_starts) * len(y_starts) * len(z_starts)
     logger.log(f"Total expected patches: {total_patches} (X: {len(x_starts)}, Y: {len(y_starts)}, Z: {len(z_starts)})")
@@ -333,31 +333,20 @@ def _calculate_xy_starts_fixed(dim_size, patch_size, num_patches=3):
     logger.log(f"Calculated starts: {starts}")
     return starts
 
-def _calculate_z_starts_with_overlap(dim_size, patch_size, overlap=20):
-    """Z軸處理，包含適當的overlap"""
-    logger.log(f"Calculating Z starts for dim_size={dim_size}, patch_size={patch_size}, overlap={overlap}")
+def _calculate_z_starts_with_overlap(dim_size, patch_size):
+    """Z軸處理，適用於連續Z值範圍"""
+    logger.log(f"Calculating Z starts for dim_size={dim_size}, patch_size={patch_size}")
     
     if dim_size <= patch_size:
-        logger.log("Z dimension <= patch_size, using single patch")
-        return [0]  # 只需要一個patch（會被padding）
+        logger.log(f"Single patch with padding (Z={dim_size} <= {patch_size})")
+        return [0]
     
-    # 兩個patch的情況，確保有適當overlap
-    stride = patch_size - overlap
-    starts = [0]
+    # 雙patch策略：[0, dim_size - patch_size]
+    starts = [0, dim_size - patch_size]
+    overlap = patch_size - (dim_size - patch_size)
+    overlap_pct = (overlap / patch_size) * 100
     
-    # 計算第二個patch的起始位置
-    # 確保第二個patch能覆蓋到末端，同時有適當overlap
-    second_start = max(stride, dim_size - patch_size)
-    
-    # 如果second_start太接近0，調整為有意義的overlap
-    if second_start < overlap:
-        second_start = dim_size - patch_size
-    
-    starts.append(second_start)
-    
-    # 計算實際overlap
-    actual_overlap = patch_size - second_start if second_start > 0 else 0
-    logger.log(f"Z starts: {starts}, actual overlap: {actual_overlap}")
+    logger.log(f"Dual patches: [0:{patch_size}], [{starts[1]}:{dim_size}], overlap={overlap}px ({overlap_pct:.1f}%)")
     
     return starts
 
