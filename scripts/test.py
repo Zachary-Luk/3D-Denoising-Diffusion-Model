@@ -59,12 +59,13 @@ def main():
     else:
         th.manual_seed(10)
     
-    # DDIM 采樣（用固定 noise）
-    logger.log(f"Starting DDIM denoising with eta={args.eta}...")
+    # 采樣（DDIM 或 DDPM）
+    logger.log(f"Starting {'DDIM' if args.use_ddim else 'DDPM'} denoising...")
     with th.no_grad():
         noise = th.randn(*shape, device=dev)
         
         if args.use_ddim:
+            logger.log(f"Using DDIM with eta={args.eta}")
             sample = diffusion.ddim_sample_loop(
                 model,
                 shape,
@@ -74,7 +75,7 @@ def main():
                 eta=args.eta,
             )
         else:
-            # 備用 DDPM
+            logger.log("Using DDPM")
             sample = diffusion.p_sample_loop(
                 model,
                 shape,
@@ -175,9 +176,9 @@ def create_argparser():
         save_dir='',
         clip_denoised=True,
         batch_size=1,
-        use_ddim=True,  # 改為 True，啟用 DDIM
+        use_ddim=True,  # 啟用 DDIM
         eta=0.0,        # 確定性 DDIM
-        timestep_respacing="ddim200",  # 200 steps DDIM
+        timestep_respacing="",  # 移除有問題嘅 ddim200，用標準 1000 steps
         base_samples="",
         model_path="",
     )
